@@ -16,20 +16,23 @@ const CONFIG = {
   cameraHeight: 720,
   cameraFps: 60,           // more frames per second = less blur and more samples per flick
 
-  // ---- Position check (before tapping the tip) ----
-  guideZone: { x: 0.28, y: 0.06, w: 0.44, h: 0.68 }, // where the tip should move (fractions of frame width/height)
+  // ---- Position check + automatic tip detection ----
+  guideZone: { x: 0.28, y: 0.06, w: 0.44, h: 0.68 }, // TIP ZONE: hold the tip in here (fractions of frame width/height)
   minBrightness: 70,       // average frame brightness must be at least this
   maxGlare: 0.12,          // at most this fraction of the frame may be blown-out white (window / lamp behind you)
-  darkLevel: 60,           // anything darker than this looks like black tape to the tracker
-  maxDarkInZone: 0.03,     // at most this fraction of the guide zone may be dark (hair, clothes, furniture...)
-  positionHoldMs: 1500,    // all checks must stay green this long
+  darkLevel: 60,           // anything darker than this counts as "black" (the tape, or something confusing)
+  minTapePixels: 10,       // a dark spot must be at least this big (processing pixels) to be the tape
+  maxTapeArea: 0.03,       // ...and at most this fraction of the frame (bigger = hair, clothes, a dark wall...)
+  maxDarkInZone: 0.03,     // apart from the tape, at most this fraction of the zone may be dark
+  positionHoldMs: 1500,    // all checks must stay green this long, then the tip is locked automatically
+  positionGraceMs: 250,    // a check may blink red this long without restarting the hold (e.g. motion blur)
+  lockMaxMove: 0.01,       // lock on only when the tape moved less than this since the previous frame
 
-  // ---- Tapping the tape (lock-on) ----
+  // ---- Lock-on (measuring the tape once it is found) ----
   procWidth: 320,          // hidden processing canvas width (height follows camera aspect)
-  tapSnapRadius: 0.05,     // the tap snaps to the darkest spot within this distance
-  growLumaTol: 28,         // when measuring the tape: neighbor brightness must be within this of the tapped spot
+  lockSnapRadius: 0.05,    // lock-on snaps to the darkest spot within this distance of the detected tape
+  growLumaTol: 28,         // when measuring the tape: neighbor brightness must be within this of its darkest spot
   growChromaTol: 18,       // ...and its color tint within this
-  maxTapeArea: 0.03,       // a tape bigger than this fraction of the frame = it blends into the background
   minPixels: 6,            // blobs smaller than this are ignored (noise)
 
   // ---- Tracking ----
@@ -37,9 +40,10 @@ const CONFIG = {
   chromaTol: 20,           // color-tint tolerance (minimum)
   tolFromSpread: 2.5,      // tolerances grow to this many standard deviations of the tape's own variation
   searchRadius: 0.2,       // look for the tape within this distance of where it is predicted to be
-  areaMin: 0.25,           // accepted blob size, relative to the tape's size at tap time
+  areaMin: 0.25,           // accepted blob size, relative to the tape's size at lock-on
   areaMax: 4,
   modelAdapt: 0.03,        // how fast the remembered tape color/size follows lighting changes (0 = never)
+  adaptMaxSpeed: 0.5,      // ...only learned while the tip moves slower than this (frame heights per second)
 
   // ---- One Euro smoothing filter (low jitter when slow, low lag when fast) ----
   filterMinCutoff: 2.0,    // lower = smoother when the tip is still

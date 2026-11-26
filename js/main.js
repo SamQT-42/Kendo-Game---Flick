@@ -2,14 +2,13 @@
 //  Game flow: screens, camera, phases, trail and debug drawing.
 //
 //  Game-screen phases (driven from one requestAnimationFrame loop):
-//    loading -> position -> pick -> ready -> count -> play -> (result screen)
+//    loading -> position (auto-detects the tip) -> ready -> count -> play -> (result screen)
 // =====================================================================
 (() => {
   const $ = (id) => document.getElementById(id);
 
   const screens = { menu: $("screen-menu"), game: $("screen-game"), result: $("screen-result") };
   const video = $("video");
-  const frame = $("cam-frame");
   const overlay = $("overlay");
   const octx = overlay.getContext("2d");
   const timerEl = $("timer");
@@ -34,6 +33,8 @@
   let lastVideoTime = -1;
   let scene = null;         // last position-check result
   let goodSince = null;     // when all position checks turned green
+  let badSince = null;      // when a check last turned red (for the grace period)
+  let lastSceneTape = null; // tape spot detected in the previous frame (to measure stillness)
 
   // ---------------------------------------------------------------- screens
   function showScreen(name) {
@@ -133,8 +134,10 @@
     lastTip = null;
     scene = null;
     goodSince = null;
+    badSince = null;
+    lastSceneTape = null;
     flicks.reset();
-    tracker.reset();          // always tap the tip again (also after RETRY)
+    tracker.reset();          // always detect the tip again (also after RETRY)
     setCounter(0, false);
     timerEl.textContent = CONFIG.gameDurationSec;
     setPhase("loading");
@@ -181,49 +184,49 @@
     return `<div class="${ok ? "ok" : "bad"}">${ok ? "[OK]" : "[!!]"} ${ok ? okText : badText}</div>`;
   }
 
+  // All checks must stay green for positionHoldMs (short red blinks under
+  // positionGraceMs are forgiven), then the detected tape is locked on
+  // automatically: no tapping, the player never leaves their stance.
   function updatePosition(now) {
     if (!scene) return;
-    const allOk = scene.lightOk && scene.glareOk && scene.zoneOk;
-    if (!allOk) goodSince = null;
-    else if (goodSince === null) goodSince = now;
+    const allOk = scene.lightOk && scene.glareOk && scene.tapeOk && scene.zoneOk;
+    if (allOk) {
+      badSince = null;
+      if (goodSince === null) goodSince = now;
+    } else {
+      if (badSince === null) badSince = now;
+      if (now - badSince > CONFIG.positionGraceMs) goodSince = null;
+    }
     const held = goodSince === null ? 0 : Math.min(1, (now - goodSince) / CONFIG.positionHoldMs);
 
+    const tapeBad = scene.candidates > 1
+      ? `${scene.candidates} DARK SPOTS IN THE BOX - ONLY THE TAPE SHOULD BE BLACK`
+      : "NO BLACK TAPE FOUND - HOLD THE SHINAI TIP IN THE BOX";
+    // Lock on only from THIS frame's detection, and only while the tip is
+    // still: a moving tip is motion-blurred grey and would be measured wrong.
+    const still = scene.tapeOk && scene.tapeMove <= CONFIG.lockMaxMove;
+    if (held >= 1 && still) {
+      const res = tracker.lockAt(scene.tape.x, scene.tape.y, now);
+      if (res.ok) {
+        setHint(`<div class="hint-title ok">LOCKED ON!</div>`);
+        trail = [];
+        setPhase("ready");
+        return;
+      }
+      goodSince = null; // measured badly (blends in / not dark): keep checking
+    }
+
+    const title = held >= 1 ? "HOLD STILL..." : "GET IN POSITION: HOLD THE SHINAI TIP IN THE BOX";
     setHint(
-      `<div class="hint-title">GET IN POSITION: THE TIP SHOULD MOVE INSIDE THE BOX</div>` +
+      `<div class="hint-title">${title}</div>` +
       checkLine(scene.lightOk, "LIGHT", "TOO DARK - ADD LIGHT") +
       checkLine(scene.glareOk, "NO GLARE", "BRIGHT LIGHT BEHIND YOU - TURN AWAY FROM IT") +
+      checkLine(scene.tapeOk, "TIP FOUND", tapeBad) +
       checkLine(scene.zoneOk, "BOX IS CLEAR", "DARK THINGS IN THE BOX (HAIR, CLOTHES...) - STEP ASIDE UNTIL NO PINK") +
       `<div class="bar"><div style="width:${Math.round(held * 100)}%"></div></div>`
     );
 
-    if (held >= 1) {
-      setPhase("pick");
-      setHint(`<div class="hint-title">TAP THE BLACK TAPE ON YOUR SHINAI TIP</div>`);
-    }
   }
-
-  // ---------------------------------------------------------------- tapping the tape
-  frame.addEventListener("pointerdown", (e) => {
-    if (phase !== "pick" || !tracker.w) return;
-    const r = video.getBoundingClientRect();
-    const u = (e.clientX - r.left) / r.width;
-    const v = (e.clientY - r.top) / r.height;
-    if (u < 0 || u > 1 || v < 0 || v > 1) return;
-    const res = tracker.pickAt(u, v, performance.now());
-    if (!res.ok) {
-      setHint(
-        `<div class="hint-title bad">${
-          res.reason === "blend"
-            ? "THE TAPE BLENDS INTO THE BACKGROUND - MOVE TO A LIGHTER SPOT AND TAP AGAIN"
-            : "MISSED - TAP RIGHT ON THE BLACK TAPE"
-        }</div>`
-      );
-      return;
-    }
-    setHint(`<div class="hint-title ok">LOCKED ON!</div>`);
-    trail = [];
-    setPhase("ready");
-  });
 
   // ---------------------------------------------------------------- main loop
   function loop() {
@@ -233,7 +236,13 @@
     // 1. process each new camera frame once
     if (stream && video.readyState >= 2 && tracker.w && hasNewFrame()) {
       tracker.grab(video);
-      if (phase === "position") scene = tracker.sceneCheck(CONFIG.guideZone);
+      if (phase === "position") {
+        scene = tracker.sceneCheck(CONFIG.guideZone);
+        // how far the detected tape moved since the previous frame (for "hold still")
+        const prev = lastSceneTape, cur = scene.tape;
+        scene.tapeMove = prev && cur ? Math.hypot((cur.x - prev.x) * tracker.w / tracker.h, cur.y - prev.y) : Infinity;
+        lastSceneTape = cur;
+      }
       const tip = tracker.update(now);
       lastTip = tip;
       if (tip) {
@@ -296,8 +305,10 @@
     const W = overlay.width, H = overlay.height;
     octx.clearRect(0, 0, W, H);
 
-    if (phase === "position") drawDarkInZone(W, H);
-    if (phase === "position" || phase === "pick") drawGuideZone(W, H, dpr);
+    if (phase === "position") {
+      drawDarkInZone(W, H, dpr);
+      drawGuideZone(W, H, dpr);
+    }
     if (debug) drawDebugMask(W, H);
     drawTrail(now, W, H, dpr);
     if (debug) drawDebugInfo(W, H, dpr);
@@ -305,16 +316,18 @@
 
   function drawGuideZone(W, H, dpr) {
     const z = CONFIG.guideZone;
-    const ok = phase === "pick" || (scene && scene.lightOk && scene.glareOk && scene.zoneOk);
+    const ok = scene && scene.lightOk && scene.glareOk && scene.tapeOk && scene.zoneOk;
     octx.save();
     octx.strokeStyle = ok ? "#4de1ff" : "#ff4f7b";
     octx.lineWidth = 3 * dpr;
     octx.setLineDash([10 * dpr, 8 * dpr]);
     octx.strokeRect(z.x * W, z.y * H, z.w * W, z.h * H);
     octx.setLineDash([]);
-    octx.font = `${10 * dpr}px "Press Start 2P", monospace`;
+    octx.font = `${11 * dpr}px "Press Start 2P", monospace`;
+    octx.fillStyle = "#0a1628";
+    octx.fillText("TIP ZONE", z.x * W + 8 * dpr, z.y * H + 20 * dpr);
     octx.fillStyle = octx.strokeStyle;
-    octx.fillText("TIP ZONE", z.x * W + 6 * dpr, z.y * H + 16 * dpr);
+    octx.fillText("TIP ZONE", z.x * W + 6 * dpr, z.y * H + 18 * dpr);
     octx.restore();
   }
 
@@ -343,13 +356,24 @@
   const CYAN = [77, 225, 255, 230];
   const SHADE = [0, 0, 0, 90];
 
-  function drawDarkInZone(W, H) {
-    if (!tracker.Y) return;
-    const z = CONFIG.guideZone, { w, h, Y } = tracker;
-    const x0 = z.x * w, x1 = (z.x + z.w) * w, y0 = z.y * h, y1 = (z.y + z.h) * h;
-    paintMask(W, H, (p, x, y) =>
-      x >= x0 && x < x1 && y >= y0 && y < y1 && Y[p] < CONFIG.darkLevel ? PINK : null
-    );
+  // Position phase: dark pixels in the zone that would confuse the tracker
+  // are pink; the auto-detected tape is cyan with a "TIP" marker.
+  function drawDarkInZone(W, H, dpr) {
+    if (!scene || !tracker.mask) return;
+    const { mask, labels } = tracker;
+    const tapeLabel = scene.tapeLabel;
+    paintMask(W, H, (p) => (!mask[p] ? null : tapeLabel && labels[p] === tapeLabel ? CYAN : PINK));
+    if (scene.tape) {
+      const x = scene.tape.x * W, y = scene.tape.y * H, r = 18 * dpr;
+      octx.strokeStyle = "#4de1ff";
+      octx.lineWidth = 3 * dpr;
+      octx.strokeRect(x - r, y - r, 2 * r, 2 * r);
+      octx.font = `${11 * dpr}px "Press Start 2P", monospace`;
+      octx.fillStyle = "#0a1628";
+      octx.fillText("TIP", x + r + 6 * dpr, y + 7 * dpr);
+      octx.fillStyle = "#4de1ff";
+      octx.fillText("TIP", x + r + 4 * dpr, y + 5 * dpr);
+    }
   }
 
   function drawTrail(now, W, H, dpr) {

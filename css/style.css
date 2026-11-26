@@ -159,8 +159,6 @@ body::after {
   width: min(94vw, calc((100dvh - 150px) * var(--ar)));
   overflow: hidden;
   background: #000;
-  cursor: crosshair;
-  touch-action: none;
 }
 .cam-frame video {
   position: absolute;

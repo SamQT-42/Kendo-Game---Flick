@@ -9,7 +9,7 @@
 //   3. mark pixels that look like the tape (the mask)
 //   4. group touching marked pixels into blobs (connected components)
 //   5. keep the blob that is near where the tape is PREDICTED to be and
-//      about the same SIZE as the tape was when tapped. Hair, clothes and
+//      about the same SIZE as the tape was at lock-on. Hair, clothes and
 //      other dark things form other blobs and are ignored.
 //   6. its center (sub-pixel) is the tip. The flick counter uses that raw
 //      center (it averages many pixels, so it is already precise and has no
@@ -53,7 +53,7 @@ class TipTracker {
     this.reset();
   }
 
-  /** Forget the tape (a new tap is needed). */
+  /** Forget the tape (it must be detected and locked again). */
   reset() {
     this.target = null;   // {y, cb, cr, area, tolY, tolC}
     this.raw = null;      // last unfiltered tip {x, y} (normalized)
@@ -97,45 +97,91 @@ class TipTracker {
     }
   }
 
-  // ------------------------------------------------------------------ position check
-  /** Scene checks used before tapping. zone is in normalized {x,y,w,h}. */
+  // ------------------------------------------------------------------ position check + auto-detect
+  /**
+   * Scene checks before lock-on, and automatic tape detection.
+   * zone is normalized {x,y,w,h}.
+   *
+   * Inside the zone, dark pixels (Y < darkLevel) are grouped into blobs.
+   * A blob between minTapePixels and maxTapeArea is a tape candidate.
+   * The scene is good when there is exactly ONE candidate and almost
+   * nothing else in the zone is dark, so the tape can't be confused.
+   * After this call, mask[p] = 1 for dark zone pixels and labels[p] ===
+   * result.tapeLabel for the tape's pixels (used for drawing).
+   */
   sceneCheck(zone) {
-    const { w, h, Y, cfg } = this;
+    const { w, h, Y, mask, labels, stack, cfg } = this;
     let sum = 0, glare = 0;
     for (let p = 0; p < Y.length; p++) { sum += Y[p]; if (Y[p] > 245) glare++; }
-    const x0 = Math.floor(zone.x * w), x1 = Math.ceil((zone.x + zone.w) * w);
-    const y0 = Math.floor(zone.y * h), y1 = Math.ceil((zone.y + zone.h) * h);
-    let dark = 0, zoneCount = 0;
+
+    const x0 = Math.max(0, Math.floor(zone.x * w)), x1 = Math.min(w, Math.ceil((zone.x + zone.w) * w));
+    const y0 = Math.max(0, Math.floor(zone.y * h)), y1 = Math.min(h, Math.ceil((zone.y + zone.h) * h));
+    mask.fill(0);
+    labels.fill(0);
+    let dark = 0;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
-        zoneCount++;
-        if (Y[y * w + x] < cfg.darkLevel) dark++;
+        const p = y * w + x;
+        if (Y[p] < cfg.darkLevel) { mask[p] = 1; dark++; }
       }
     }
+    const zoneCount = Math.max(1, (x1 - x0) * (y1 - y0));
+
+    // dark blobs inside the zone (4-neighbor flood fill, kept within the zone)
+    const candidates = [];
+    const maxArea = cfg.maxTapeArea * w * h;
+    let next = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const start = y * w + x;
+        if (!mask[start] || labels[start]) continue;
+        const label = ++next;
+        let sp = 0, area = 0, sx = 0, sy = 0;
+        stack[sp++] = start; labels[start] = label;
+        while (sp > 0) {
+          const p = stack[--sp];
+          const px = p % w, py = (p / w) | 0;
+          area++; sx += px; sy += py;
+          if (px > x0 && mask[p - 1] && !labels[p - 1]) { labels[p - 1] = label; stack[sp++] = p - 1; }
+          if (px < x1 - 1 && mask[p + 1] && !labels[p + 1]) { labels[p + 1] = label; stack[sp++] = p + 1; }
+          if (py > y0 && mask[p - w] && !labels[p - w]) { labels[p - w] = label; stack[sp++] = p - w; }
+          if (py < y1 - 1 && mask[p + w] && !labels[p + w]) { labels[p + w] = label; stack[sp++] = p + w; }
+        }
+        if (area >= cfg.minTapePixels && area <= maxArea) {
+          candidates.push({ label, area, x: (sx / area + 0.5) / w, y: (sy / area + 0.5) / h });
+        }
+      }
+    }
+
+    const tape = candidates.length === 1 ? candidates[0] : null;
     const brightness = sum / Y.length;
     const glareFrac = glare / Y.length;
-    const darkFrac = dark / Math.max(1, zoneCount);
+    const otherDarkFrac = (dark - (tape ? tape.area : 0)) / zoneCount;
     return {
-      brightness, glareFrac, darkFrac,
+      brightness, glareFrac, otherDarkFrac,
+      candidates: candidates.length,
+      tape,                                   // {x, y, area, label} or null
+      tapeLabel: tape ? tape.label : 0,
       lightOk: brightness >= cfg.minBrightness,
       glareOk: glareFrac <= cfg.maxGlare,
-      zoneOk: darkFrac <= cfg.maxDarkInZone,
+      tapeOk: !!tape,
+      zoneOk: otherDarkFrac <= cfg.maxDarkInZone,
     };
   }
 
-  // ------------------------------------------------------------------ tap / lock-on
+  // ------------------------------------------------------------------ lock-on
   /**
-   * Player tapped at normalized (u, v). Snap to the darkest spot nearby,
-   * grow a region of similar color from there = the tape, and remember
-   * its color, color spread and size.
-   * Returns {ok:true} or {ok:false, reason:"small"|"blend"}.
+   * Lock on to the tape at normalized (u, v) (the auto-detected spot).
+   * Snap to the darkest spot nearby, grow a region of similar color from
+   * there = the tape, and remember its color, color spread and size.
+   * Returns {ok:true} or {ok:false, reason:"small"|"blend"|"notdark"}.
    */
-  pickAt(u, v, now) {
+  lockAt(u, v, now) {
     const { w, h, Y, Cb, Cr, cfg } = this;
     const cx = Math.round(u * (w - 1)), cy = Math.round(v * (h - 1));
 
     // 1. snap: darkest 3x3 average within the snap radius
-    const rad = Math.max(2, Math.round(cfg.tapSnapRadius * h));
+    const rad = Math.max(2, Math.round(cfg.lockSnapRadius * h));
     let best = -1, bestY = Infinity;
     for (let y = Math.max(1, cy - rad); y <= Math.min(h - 2, cy + rad); y++) {
       for (let x = Math.max(1, cx - rad); x <= Math.min(w - 2, cx + rad); x++) {
@@ -184,6 +230,7 @@ class TipTracker {
     if (area < cfg.minPixels) return { ok: false, reason: "small" };
 
     mY /= area; mCb /= area; mCr /= area;
+    if (mY >= cfg.darkLevel) return { ok: false, reason: "notdark" }; // blurred or not the tape
     const sdY = Math.sqrt(Math.max(0, qY / area - mY * mY));
     const sdC = Math.sqrt(Math.max(0, qC / area - mCb * mCb - mCr * mCr));
     this.target = {
@@ -191,6 +238,7 @@ class TipTracker {
       tolY: Math.max(cfg.lumaTol, cfg.tolFromSpread * sdY),
       tolC: Math.max(cfg.chromaTol, cfg.tolFromSpread * sdC),
     };
+    this.target.lock = { y: mY, cb: mCb, cr: mCr, area }; // values at lock-on (adaptation stays near these)
 
     const tip = { x: (sumX / area + 0.5) / w, y: (sumY / area + 0.5) / h };
     this.fx.reset(); this.fy.reset();
@@ -287,14 +335,19 @@ class TipTracker {
     this.lastSeen = now;
     this.lostFrames = 0;
 
-    // slowly follow lighting / distance changes (only when the blob looks normal)
+    // Slowly follow lighting / distance changes. Only learn from a SHARP view
+    // (tip moving slowly: a fast tip is motion-blurred grey, and learning from
+    // that would make the tracker drift away from the real black tape), and
+    // never stray far from what was measured at lock-on.
     const ratio = best.area / t.area;
-    if (cfg.modelAdapt > 0 && ratio > 0.6 && ratio < 1.6) {
-      const a = cfg.modelAdapt;
-      t.y += (best.meanY - t.y) * a;
-      t.cb += (best.meanCb - t.cb) * a;
-      t.cr += (best.meanCr - t.cr) * a;
-      t.area += (best.area - t.area) * a;
+    const speed = Math.hypot(this.vel.x * aspect, this.vel.y) * 1000; // frame heights per second
+    if (cfg.modelAdapt > 0 && speed < cfg.adaptMaxSpeed && ratio > 0.6 && ratio < 1.6) {
+      const a = cfg.modelAdapt, L = t.lock;
+      const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+      t.y = clamp(t.y + (best.meanY - t.y) * a, L.y - t.tolY / 2, L.y + t.tolY / 2);
+      t.cb = clamp(t.cb + (best.meanCb - t.cb) * a, L.cb - t.tolC / 2, L.cb + t.tolC / 2);
+      t.cr = clamp(t.cr + (best.meanCr - t.cr) * a, L.cr - t.tolC / 2, L.cr + t.tolC / 2);
+      t.area = clamp(t.area + (best.area - t.area) * a, L.area / 2, L.area * 2);
     }
 
     this.pos = { x: this.fx.filter(best.x, now), y: this.fy.filter(best.y, now) };
