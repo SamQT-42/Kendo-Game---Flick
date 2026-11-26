@@ -2,7 +2,7 @@
 //  Game flow: screens, camera, phases, trail and debug drawing.
 //
 //  Game-screen phases (driven from one requestAnimationFrame loop):
-//    loading -> pick -> ready -> count -> play -> (result screen)
+//    loading -> position -> pick -> ready -> count -> play -> (result screen)
 // =====================================================================
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -19,7 +19,7 @@
   const errorBtn = $("btn-error-menu");
   const finalEl = $("final-count");
 
-  const tracker = new ColorTracker(CONFIG);
+  const tracker = new TipTracker(CONFIG);
   const flicks = new FlickCounter(CONFIG);
 
   let stream = null;
@@ -30,6 +30,10 @@
   let trail = [];           // {x, y, t} points, or null to break the line after a lost frame
   let debug = false;
   let lastTip = null;
+  let newFrame = false;     // set when the camera delivered a frame we haven't processed
+  let lastVideoTime = -1;
+  let scene = null;         // last position-check result
+  let goodSince = null;     // when all position checks turned green
 
   // ---------------------------------------------------------------- screens
   function showScreen(name) {
@@ -54,6 +58,13 @@
     }
   }
 
+  let shownHint = null;
+  function setHint(html) {
+    if (html === shownHint) return;
+    shownHint = html;
+    hintEl.innerHTML = html;
+  }
+
   function setCounter(n, pop) {
     counterEl.textContent = n;
     if (pop) {
@@ -66,7 +77,12 @@
   // ---------------------------------------------------------------- camera
   async function startCamera(mySession) {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+      video: {
+        facingMode: "user",
+        width: { ideal: CONFIG.cameraWidth },
+        height: { ideal: CONFIG.cameraHeight },
+        frameRate: { ideal: CONFIG.cameraFps },
+      },
       audio: false,
     });
     if (mySession !== session) { stopCamera(); return false; } // player left meanwhile
@@ -78,6 +94,16 @@
     if (mySession !== session) { stopCamera(); return false; }
     document.documentElement.style.setProperty("--ar", `${video.videoWidth} / ${video.videoHeight}`);
     tracker.resize(video.videoWidth, video.videoHeight);
+
+    // Only process frames the camera actually delivered (no duplicate samples).
+    if ("requestVideoFrameCallback" in video) {
+      const onFrame = () => {
+        if (mySession !== session) return;
+        newFrame = true;
+        video.requestVideoFrameCallback(onFrame);
+      };
+      video.requestVideoFrameCallback(onFrame);
+    }
     return true;
   }
 
@@ -87,18 +113,30 @@
     video.srcObject = null;
   }
 
+  function hasNewFrame() {
+    if ("requestVideoFrameCallback" in video) {
+      const n = newFrame;
+      newFrame = false;
+      return n;
+    }
+    if (video.currentTime !== lastVideoTime) { lastVideoTime = video.currentTime; return true; }
+    return false;
+  }
+
   // ---------------------------------------------------------------- enter / leave game
-  async function enterGame({ needPick }) {
+  async function enterGame() {
     const mySession = ++session;
     showScreen("game");
     errorBtn.hidden = true;
-    hintEl.textContent = "";
+    setHint("");
     trail = [];
     lastTip = null;
+    scene = null;
+    goodSince = null;
     flicks.reset();
+    tracker.reset();          // always tap the tip again (also after RETRY)
     setCounter(0, false);
     timerEl.textContent = CONFIG.gameDurationSec;
-    if (needPick) tracker.target = null;
     setPhase("loading");
     setMessage("STARTING CAMERA...", { small: true });
 
@@ -118,12 +156,7 @@
     }
 
     setMessage("");
-    if (tracker.target) {
-      setPhase("ready");
-    } else {
-      setPhase("pick");
-      hintEl.textContent = "TAP THE WHITE TIP OF YOUR SHINAI";
-    }
+    setPhase("position");
   }
 
   function leaveGame() {
@@ -132,6 +165,7 @@
     stopCamera();
     setPhase("off");
     setMessage("");
+    setHint("");
     messageEl.style.whiteSpace = "";
   }
 
@@ -142,15 +176,51 @@
     showScreen("result");
   }
 
-  // ---------------------------------------------------------------- picking the tip color
+  // ---------------------------------------------------------------- position check UI
+  function checkLine(ok, okText, badText) {
+    return `<div class="${ok ? "ok" : "bad"}">${ok ? "[OK]" : "[!!]"} ${ok ? okText : badText}</div>`;
+  }
+
+  function updatePosition(now) {
+    if (!scene) return;
+    const allOk = scene.lightOk && scene.glareOk && scene.zoneOk;
+    if (!allOk) goodSince = null;
+    else if (goodSince === null) goodSince = now;
+    const held = goodSince === null ? 0 : Math.min(1, (now - goodSince) / CONFIG.positionHoldMs);
+
+    setHint(
+      `<div class="hint-title">GET IN POSITION: THE TIP SHOULD MOVE INSIDE THE BOX</div>` +
+      checkLine(scene.lightOk, "LIGHT", "TOO DARK - ADD LIGHT") +
+      checkLine(scene.glareOk, "NO GLARE", "BRIGHT LIGHT BEHIND YOU - TURN AWAY FROM IT") +
+      checkLine(scene.zoneOk, "BOX IS CLEAR", "DARK THINGS IN THE BOX (HAIR, CLOTHES...) - STEP ASIDE UNTIL NO PINK") +
+      `<div class="bar"><div style="width:${Math.round(held * 100)}%"></div></div>`
+    );
+
+    if (held >= 1) {
+      setPhase("pick");
+      setHint(`<div class="hint-title">TAP THE BLACK TAPE ON YOUR SHINAI TIP</div>`);
+    }
+  }
+
+  // ---------------------------------------------------------------- tapping the tape
   frame.addEventListener("pointerdown", (e) => {
-    if (phase !== "pick") return;
+    if (phase !== "pick" || !tracker.w) return;
     const r = video.getBoundingClientRect();
     const u = (e.clientX - r.left) / r.width;
     const v = (e.clientY - r.top) / r.height;
     if (u < 0 || u > 1 || v < 0 || v > 1) return;
-    if (!tracker.pickAt(u, v)) return;
-    hintEl.textContent = "";
+    const res = tracker.pickAt(u, v, performance.now());
+    if (!res.ok) {
+      setHint(
+        `<div class="hint-title bad">${
+          res.reason === "blend"
+            ? "THE TAPE BLENDS INTO THE BACKGROUND - MOVE TO A LIGHTER SPOT AND TAP AGAIN"
+            : "MISSED - TAP RIGHT ON THE BLACK TAPE"
+        }</div>`
+      );
+      return;
+    }
+    setHint(`<div class="hint-title ok">LOCKED ON!</div>`);
     trail = [];
     setPhase("ready");
   });
@@ -160,14 +230,15 @@
     rafId = requestAnimationFrame(loop);
     const now = performance.now();
 
-    // 1. tracking (runs in every phase once the camera is live, so the player sees the trail)
-    if (stream && video.readyState >= 2 && tracker.w) {
+    // 1. process each new camera frame once
+    if (stream && video.readyState >= 2 && tracker.w && hasNewFrame()) {
       tracker.grab(video);
+      if (phase === "position") scene = tracker.sceneCheck(CONFIG.guideZone);
       const tip = tracker.update(now);
       lastTip = tip;
       if (tip) {
         trail.push({ x: tip.x, y: tip.y, t: now });
-        if (phase === "play" && flicks.update(tip.y, now)) setCounter(flicks.count, true);
+        if (phase === "play" && flicks.update(tip.ry, now)) setCounter(flicks.count, true);
       } else if (trail.length && trail[trail.length - 1] !== null) {
         trail.push(null);
       }
@@ -176,9 +247,12 @@
     // 2. phase timing
     const t = now - phaseStart;
     switch (phase) {
+      case "position":
+        updatePosition(now);
+        break;
       case "ready":
         setMessage("ARE YOU READY?", { zoom: true });
-        if (t >= CONFIG.readyMs) setPhase("count");
+        if (t >= CONFIG.readyMs) { setHint(""); setPhase("count"); }
         break;
       case "count": {
         const step = Math.floor(t / CONFIG.countdownStepMs);
@@ -222,9 +296,60 @@
     const W = overlay.width, H = overlay.height;
     octx.clearRect(0, 0, W, H);
 
+    if (phase === "position") drawDarkInZone(W, H);
+    if (phase === "position" || phase === "pick") drawGuideZone(W, H, dpr);
     if (debug) drawDebugMask(W, H);
     drawTrail(now, W, H, dpr);
     if (debug) drawDebugInfo(W, H, dpr);
+  }
+
+  function drawGuideZone(W, H, dpr) {
+    const z = CONFIG.guideZone;
+    const ok = phase === "pick" || (scene && scene.lightOk && scene.glareOk && scene.zoneOk);
+    octx.save();
+    octx.strokeStyle = ok ? "#4de1ff" : "#ff4f7b";
+    octx.lineWidth = 3 * dpr;
+    octx.setLineDash([10 * dpr, 8 * dpr]);
+    octx.strokeRect(z.x * W, z.y * H, z.w * W, z.h * H);
+    octx.setLineDash([]);
+    octx.font = `${10 * dpr}px "Press Start 2P", monospace`;
+    octx.fillStyle = octx.strokeStyle;
+    octx.fillText("TIP ZONE", z.x * W + 6 * dpr, z.y * H + 16 * dpr);
+    octx.restore();
+  }
+
+  // Paint the pixels that would confuse the black-tape tracker (pink), inside the zone.
+  const maskCanvas = document.createElement("canvas");
+  const maskCtx = maskCanvas.getContext("2d");
+
+  function paintMask(W, H, colorOf) {
+    const { w, h } = tracker;
+    if (maskCanvas.width !== w || maskCanvas.height !== h) {
+      maskCanvas.width = w;
+      maskCanvas.height = h;
+    }
+    const img = maskCtx.createImageData(w, h);
+    const d = img.data;
+    for (let p = 0, i = 0; p < w * h; p++, i += 4) {
+      const c = colorOf(p, p % w, (p / w) | 0);
+      if (c) { d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = c[3]; }
+    }
+    maskCtx.putImageData(img, 0, 0);
+    octx.imageSmoothingEnabled = false;
+    octx.drawImage(maskCanvas, 0, 0, W, H);
+  }
+
+  const PINK = [255, 79, 123, 200];
+  const CYAN = [77, 225, 255, 230];
+  const SHADE = [0, 0, 0, 90];
+
+  function drawDarkInZone(W, H) {
+    if (!tracker.Y) return;
+    const z = CONFIG.guideZone, { w, h, Y } = tracker;
+    const x0 = z.x * w, x1 = (z.x + z.w) * w, y0 = z.y * h, y1 = (z.y + z.h) * h;
+    paintMask(W, H, (p, x, y) =>
+      x >= x0 && x < x1 && y >= y0 && y < y1 && Y[p] < CONFIG.darkLevel ? PINK : null
+    );
   }
 
   function drawTrail(now, W, H, dpr) {
@@ -257,37 +382,25 @@
   }
 
   // ---------------------------------------------------------------- debug (press D)
-  const maskCanvas = document.createElement("canvas");
-  const maskCtx = maskCanvas.getContext("2d");
-
   function drawDebugMask(W, H) {
-    if (!tracker.mask || !tracker.target) return;
-    const { w, h, mask } = tracker;
-    if (maskCanvas.width !== w || maskCanvas.height !== h) {
-      maskCanvas.width = w;
-      maskCanvas.height = h;
-    }
-    const img = maskCtx.createImageData(w, h);
-    for (let m = 0, i = 0; m < mask.length; m++, i += 4) {
-      if (mask[m]) {
-        img.data[i] = 77; img.data[i + 1] = 225; img.data[i + 2] = 255; img.data[i + 3] = 190;
-      } else {
-        img.data[i + 3] = 90; // darken non-matching pixels so the mask stands out
-      }
-    }
-    maskCtx.putImageData(img, 0, 0);
-    octx.imageSmoothingEnabled = false;
-    octx.drawImage(maskCanvas, 0, 0, W, H);
+    if (!tracker.target || !tracker.mask) return;
+    const { mask, labels, selected } = tracker;
+    // pink = looks like the tape, cyan = the blob chosen as the tip, dark = everything else
+    paintMask(W, H, (p) => (!mask[p] ? SHADE : selected && labels[p] === selected ? CYAN : PINK));
   }
 
   function drawDebugInfo(W, H, dpr) {
-    // search radius around last raw position
-    if (tracker.raw && CONFIG.searchRadius > 0) {
-      octx.strokeStyle = "rgba(255,255,255,0.5)";
+    const cfg = CONFIG;
+    // search circle around the prediction
+    if (tracker.pred && tracker.target) {
+      const r = Math.min(1, cfg.searchRadius * (1 + 0.5 * tracker.lostFrames)) * H;
+      octx.strokeStyle = "rgba(255,255,255,0.6)";
       octx.lineWidth = 1 * dpr;
       octx.beginPath();
-      octx.arc(tracker.raw.x * W, tracker.raw.y * H, CONFIG.searchRadius * H, 0, Math.PI * 2);
+      octx.arc(tracker.pred.x * W, tracker.pred.y * H, r, 0, Math.PI * 2);
       octx.stroke();
+      octx.fillStyle = "#ffd84d";
+      octx.fillRect(tracker.pred.x * W - 3 * dpr, tracker.pred.y * H - 3 * dpr, 6 * dpr, 6 * dpr);
     }
     // flick extremes
     const hline = (y, color) => {
@@ -314,20 +427,23 @@
       octx.stroke();
     }
     // text
-    const c = tracker.target;
+    const t = tracker.target;
+    const sel = tracker.blobs.find((b) => b.label === tracker.selected);
+    const f = (v, n = 3) => (v === null || v === undefined ? "-" : v.toFixed(n));
     const lines = [
-      `DEBUG (D)  phase:${phase}`,
-      `color: ${c ? `${c.r | 0},${c.g | 0},${c.b | 0}` : "-"}  tol:${CONFIG.colorTolerance}`,
-      `matches: ${tracker.matchCount}  min:${CONFIG.minPixels}  ${lastTip ? "FOUND" : "LOST"}`,
-      `tip y: ${lastTip ? lastTip.y.toFixed(3) : "-"}  state:${flicks.state}`,
-      `low: ${flicks.low === null ? "-" : flicks.low.toFixed(3)}  high: ${flicks.high === null ? "-" : flicks.high.toFixed(3)}`,
+      `DEBUG (D)  phase:${phase}  ${tracker.w}x${tracker.h}  cam:${video.videoWidth}x${video.videoHeight}`,
+      scene && phase === "position"
+        ? `light:${f(scene.brightness, 0)}  glare:${f(scene.glareFrac)}  dark in zone:${f(scene.darkFrac)}`
+        : `tape Y:${t ? f(t.y, 0) : "-"} tolY:${t ? f(t.tolY, 0) : "-"} tolC:${t ? f(t.tolC, 0) : "-"} area:${t ? f(t.area, 0) : "-"}`,
+      `blobs:${tracker.blobs.length}  matches:${tracker.matchCount}  chosen area:${sel ? sel.area : "-"}  ${lastTip ? "FOUND" : "LOST"}`,
+      `tip y:${lastTip ? f(lastTip.y) : "-"}  state:${flicks.state}  low:${f(flicks.low)}  high:${f(flicks.high)}`,
     ];
     const fs = 11 * dpr;
     octx.font = `${fs}px monospace`;
-    octx.fillStyle = "rgba(10,22,40,0.8)";
-    octx.fillRect(0, H - lines.length * fs * 1.4 - 8 * dpr, W, lines.length * fs * 1.4 + 8 * dpr);
+    octx.fillStyle = "rgba(10,22,40,0.85)";
+    octx.fillRect(0, 0, W, lines.length * fs * 1.4 + 8 * dpr);
     octx.fillStyle = "#4de1ff";
-    lines.forEach((l, i) => octx.fillText(l, 6 * dpr, H - (lines.length - i - 0.6) * fs * 1.4));
+    lines.forEach((l, i) => octx.fillText(l, 6 * dpr, (i + 1) * fs * 1.4));
   }
 
   window.addEventListener("keydown", (e) => {
@@ -335,8 +451,8 @@
   });
 
   // ---------------------------------------------------------------- buttons
-  $("btn-start").addEventListener("click", () => enterGame({ needPick: true }));
-  $("btn-retry").addEventListener("click", () => enterGame({ needPick: false }));
+  $("btn-start").addEventListener("click", enterGame);
+  $("btn-retry").addEventListener("click", enterGame);
   $("btn-menu").addEventListener("click", () => showScreen("menu"));
   errorBtn.addEventListener("click", () => { leaveGame(); showScreen("menu"); });
 })();
