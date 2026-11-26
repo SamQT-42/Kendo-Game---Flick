@@ -1,0 +1,234 @@
+/* ============ Palette ============ */
+:root {
+  --sky: #bfe6f5;
+  --navy: #0a1628;
+  --navy-btn: #0d1f3c;
+  --cyan: #4de1ff;
+  --pink: #ff4f7b;
+  --white: #ffffff;
+  --glow: 0 0 8px rgba(77, 225, 255, 0.55), inset 0 0 6px rgba(77, 225, 255, 0.25);
+  --glow-hot: 0 0 18px rgba(77, 225, 255, 0.95), inset 0 0 10px rgba(77, 225, 255, 0.45);
+  --font: "Press Start 2P", monospace;
+  --ar: 4 / 3; /* camera aspect ratio, updated from JS once the video loads */
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  color: var(--white);
+  background: linear-gradient(to bottom, var(--sky) 0%, var(--navy) 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: none;
+  user-select: none;
+}
+
+/* Faint scanlines over everything */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1000;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.12) 0px,
+    rgba(0, 0, 0, 0.12) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* ============ Screens ============ */
+.screen {
+  position: fixed;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 16px;
+}
+.screen.active { display: flex; }
+
+/* ============ Title (glitch offset) ============ */
+.title {
+  font-size: clamp(22px, 6vw, 52px);
+  line-height: 1.35;
+  text-align: center;
+  letter-spacing: 0.08em;
+  color: var(--white);
+  text-shadow:
+    -3px 0 var(--pink),
+     3px 0 var(--cyan),
+     0 4px 0 var(--navy);
+}
+.title-small { font-size: clamp(20px, 5vw, 40px); }
+
+/* ============ Buttons & framed boxes ============ */
+.btn,
+.box {
+  background: var(--navy-btn);
+  border: 4px solid var(--cyan);
+  border-radius: 0;
+  box-shadow: var(--glow);
+}
+
+.btn {
+  font-family: var(--font);
+  font-size: clamp(12px, 2.2vw, 18px);
+  color: var(--white);
+  text-transform: uppercase;
+  letter-spacing: 0.25em;
+  padding: 16px 26px 16px calc(26px + 0.25em); /* balance trailing letter-spacing */
+  cursor: pointer;
+  transition: box-shadow 0.12s, transform 0.05s;
+}
+.btn:hover,
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--glow-hot);
+}
+.btn:active { transform: translateY(2px); }
+
+.btn-big {
+  font-size: clamp(18px, 4vw, 32px);
+  padding: 22px 44px 22px calc(44px + 0.25em);
+}
+
+.btn-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* ============ Game screen ============ */
+#screen-game {
+  gap: 14px;
+  justify-content: flex-start;
+  padding-top: 14px;
+  /* the provided background art, scaled up pixel-crisp, with a navy tint so the HUD reads */
+  background:
+    linear-gradient(rgba(10, 22, 40, 0.35), rgba(10, 22, 40, 0.55)),
+    url("../assets/main.png") center / cover no-repeat,
+    linear-gradient(to bottom, var(--sky), var(--navy));
+  image-rendering: pixelated;
+}
+
+.hud {
+  display: flex;
+  gap: 16px;
+}
+
+.stat {
+  min-width: 150px;
+  padding: 10px 14px;
+  text-align: center;
+}
+.stat-label {
+  font-size: 11px;
+  letter-spacing: 0.25em;
+  color: var(--cyan);
+  margin-bottom: 8px;
+}
+.stat-value {
+  font-size: clamp(26px, 5vw, 40px);
+  line-height: 1;
+  color: var(--white);
+  text-shadow: 3px 3px 0 var(--pink);
+}
+
+/* "pop" when the counter goes up */
+.pop { animation: pop 0.22s steps(4); }
+@keyframes pop {
+  0%   { transform: scale(1.6); color: var(--pink); text-shadow: 3px 3px 0 var(--white); }
+  100% { transform: scale(1); }
+}
+
+/* Camera frame: keeps the video's aspect ratio and fills the space left under the HUD */
+.cam-frame {
+  position: relative;
+  aspect-ratio: var(--ar);
+  width: min(94vw, calc((100dvh - 150px) * var(--ar)));
+  overflow: hidden;
+  background: #000;
+  cursor: crosshair;
+  touch-action: none;
+}
+.cam-frame video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;            /* frame already matches aspect ratio, so this is undistorted */
+  transform: scaleX(-1);       /* mirror */
+}
+.cam-frame canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.hint {
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  padding: 10px;
+  font-size: clamp(10px, 1.8vw, 14px);
+  line-height: 1.6;
+  text-align: center;
+  letter-spacing: 0.1em;
+  background: rgba(10, 22, 40, 0.75);
+  border-bottom: 3px solid var(--cyan);
+  pointer-events: none;
+}
+.hint:empty { display: none; }
+
+.message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 12px;
+  font-size: clamp(22px, 6vw, 64px);
+  line-height: 1.4;
+  color: var(--white);
+  text-shadow: -4px 0 var(--pink), 4px 0 var(--cyan), 0 5px 0 var(--navy);
+  pointer-events: none;
+}
+.message.small { font-size: clamp(12px, 2.2vw, 18px); text-shadow: 2px 2px 0 var(--navy); }
+.message.zoom { animation: zoom 0.35s steps(5); }
+@keyframes zoom {
+  0%   { transform: scale(2.2); opacity: 0; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+.error-btn {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+}
+.error-btn:active { transform: translate(-50%, 2px); }
+
+/* ============ Result screen ============ */
+.result-box {
+  padding: 22px 48px;
+  text-align: center;
+}
+.result-value {
+  font-size: clamp(56px, 14vw, 120px);
+  line-height: 1;
+  text-shadow: -4px 0 var(--pink), 4px 0 var(--cyan);
+}

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kendo Shinai Flicker Count</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- 1. MAIN MENU -->
+  <section id="screen-menu" class="screen active">
+    <h1 class="title">KENDO<br />SHINAI<br />FLICKER<br />COUNT</h1>
+    <button id="btn-start" class="btn btn-big">START</button>
+  </section>
+
+  <!-- 2. GAME -->
+  <section id="screen-game" class="screen">
+    <div class="hud">
+      <div class="box stat">
+        <div class="stat-label">TIME</div>
+        <div id="timer" class="stat-value">30</div>
+      </div>
+      <div class="box stat">
+        <div class="stat-label">FLICKS</div>
+        <div id="counter" class="stat-value">0</div>
+      </div>
+    </div>
+
+    <div id="cam-frame" class="box cam-frame">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="overlay"></canvas>
+      <div id="hint" class="hint"></div>
+      <div id="message" class="message"></div>
+      <button id="btn-error-menu" class="btn error-btn" hidden>MAIN MENU</button>
+    </div>
+  </section>
+
+  <!-- 3. RESULT -->
+  <section id="screen-result" class="screen">
+    <h2 class="title title-small">TIME UP!</h2>
+    <div class="box result-box">
+      <div class="stat-label">FLICKS</div>
+      <div id="final-count" class="result-value">0</div>
+    </div>
+    <div class="btn-row">
+      <button id="btn-retry" class="btn">RETRY</button>
+      <button id="btn-menu" class="btn">MAIN MENU</button>
+    </div>
+  </section>
+
+  <script src="js/config.js"></script>
+  <script src="js/tracker.js"></script>
+  <script src="js/flick.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
